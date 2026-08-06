@@ -61,8 +61,19 @@ body {
 .agent-item {
   padding: 14px 16px;
   border-radius: 14px;
-  background: linear-gradient(135deg, #ff7a18, #ff4aa8);
   font-weight: 700;
+}
+
+.comedian-item {
+  background: linear-gradient(135deg, #2563eb, #60a5fa);
+}
+
+.cook-item {
+  background: linear-gradient(135deg, #16a34a, #4ade80);
+}
+
+.doctor-item {
+  background: linear-gradient(135deg, #ec4899, #f472b6);
 }
 
 .agent-row {
@@ -93,7 +104,7 @@ body {
   position: absolute;
   cursor: pointer;
   inset: 0;
-  background: #ff6b6b;
+  background: #000;
   border-radius: 34px;
   transition: 0.25s ease;
 }
@@ -105,17 +116,18 @@ body {
   width: 26px;
   left: 4px;
   bottom: 4px;
-  background: white;
+  background: #fff;
   border-radius: 50%;
   transition: 0.25s ease;
 }
 
 .switch input:checked + .slider {
-  background: #34d399;
+  background: #fff;
 }
 
 .switch input:checked + .slider::before {
   transform: translateX(26px);
+  background: #000;
 }
 
 .chat-display {
@@ -146,6 +158,35 @@ body {
   align-self: flex-start;
   background: linear-gradient(135deg, rgba(255, 221, 87, 0.95), rgba(255, 104, 180, 0.95));
   color: #111827;
+}
+
+.chat-bubble.Cook.answer {
+  background: linear-gradient(135deg, #34d399, #10b981);
+  color: #041f0d;
+}
+
+.chat-bubble.Comedian.answer {
+  background: linear-gradient(135deg, #60a5fa, #3b82f6);
+  color: #0f172a;
+}
+
+.chat-bubble.Doctor.answer {
+  background: linear-gradient(135deg, #fda4af, #fb7185);
+  color: #3f001d;
+}
+
+.agent-label {
+  display: block;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 8px;
+}
+
+.bubble-text {
+  display: block;
+  white-space: pre-wrap;
 }
 
 .prompt-box {
