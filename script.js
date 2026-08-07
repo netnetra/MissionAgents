@@ -1,5 +1,5 @@
 const AGENTS = {
-  comedian: { name: 'Comedian', keywords: ['joke', 'funny', 'laugh', 'humor', 'comedy'] },
+  comedian: { name: 'Comedian', keywords: ['joke', 'funny', 'laugh', 'humor', 'comedy', 'riddle', 'riddles'] },
   cook: {
     name: 'Cook',
     keywords: [
@@ -145,11 +145,75 @@ function detectAgent(prompt) {
 }
 
 function promptNeedsJoke(prompt) {
-  return /joke|funny|humor|laugh|comedy/.test(prompt.toLowerCase());
+  return /joke|funny|humor|laugh|comedy|riddle|riddles/.test(prompt.toLowerCase());
 }
 
 function promptNeedsExplanation(prompt) {
   return /explain|how|why|what|describe|works|steps|instructions|method/.test(prompt.toLowerCase());
+}
+
+function getOnlineAgents() {
+  return Object.keys(agentState).filter((key) => agentState[key]);
+}
+
+function getAgentKeyByName(agentName) {
+  const lowerName = agentName.toLowerCase().trim();
+  return Object.keys(AGENTS).find((key) => AGENTS[key].name.toLowerCase() === lowerName) || null;
+}
+
+function extractJsonFromText(text) {
+  const start = text.indexOf('[');
+  const end = text.lastIndexOf(']');
+  if (start === -1 || end === -1) {
+    return null;
+  }
+
+  const candidate = text.slice(start, end + 1);
+  try {
+    return JSON.parse(candidate);
+  } catch (error) {
+    return null;
+  }
+}
+
+async function classifyAgents(prompt, onlineAgentKeys) {
+  const availableAgents = onlineAgentKeys.map((key) => AGENTS[key].name).join(', ');
+  addLog(`<strong>Routing:</strong> sending prompt to orchestrator with available agents: ${availableAgents}.`);
+
+  const systemMessage = {
+    role: 'system',
+    content: `You are an orchestration assistant. Determine which available agents should handle the user prompt and in what order.
+Reply with a JSON array only. Each array item must contain {"agent":"Doctor"|"Cook"|"Comedian","prompt":"..."}.
+Use only the provided available agents. Preserve explicit request order when the user names agents. For follow-on tasks, order the agents correctly. For example, if the user asks a doctor to explain a medical issue and then asks a comedian to make a joke about it, return the doctor first and then the comedian.
+If no agent is explicitly requested, choose the best agent based on the prompt. If no online agents are available, return [].`,
+  };
+
+  const userMessage = {
+    role: 'user',
+    content: `User prompt: "${prompt}"
+Available agents: ${availableAgents}.`,
+  };
+
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: authToken,
+    },
+    body: JSON.stringify({
+      model: 'class-chat-model',
+      messages: [systemMessage, userMessage],
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Orchestrator HTTP ${response.status}`);
+  }
+
+  const data = await response.json();
+  const content = data?.choices?.[0]?.message?.content || '';
+  const parsed = extractJsonFromText(content);
+  return Array.isArray(parsed) ? parsed : null;
 }
 
 function getRequestedAgents(prompt) {
@@ -194,7 +258,7 @@ function extractAgentPrompt(prompt, agentKey) {
   const patterns = {
     doctor: /burn|burns|scald|scalds|injury|injuries|wound|wounds|rash|blister|bandage|first aid|emergency|medical|pain|health|sick|break|broken|leg/,
     cook: /recipe|cook|food|meal|ingredient|chef|boil|boiling|water|steam|kettle|temperature|heat|pressure/,
-    comedian: /joke|funny|humor|laugh|comedy/,
+    comedian: /joke|funny|humor|laugh|comedy|riddle|riddles/,
   };
 
   const explanationPattern = /explain|how|why|what|describe|works|steps|instructions|method/;
@@ -237,12 +301,12 @@ function extractAgentPrompt(prompt, agentKey) {
   let target = bestMatch;
 
   if (agentKey === 'comedian') {
-    const jokePieces = target
+    const comedianPieces = target
       .split(/\band\b/i)
       .map((piece) => piece.trim())
       .filter((piece) => comedianPattern.test(piece));
-    if (jokePieces.length > 0) {
-      target = jokePieces.join(' and ');
+    if (comedianPieces.length > 0) {
+      target = comedianPieces.join(' and ');
     }
   }
 
@@ -269,32 +333,62 @@ function extractAgentPrompt(prompt, agentKey) {
   return target;
 }
 
-function tryRoute(prompt) {
-  const requestedAgents = getRequestedAgents(prompt);
-  const agentNames = requestedAgents.map((key) => AGENTS[key].name).join(', ');
-  addLog(`<strong>Routing:</strong> detected agents for this request: ${agentNames}.`);
+async function tryRoute(prompt) {
+  const onlineAgents = getOnlineAgents();
+  let steps = [];
 
-  requestedAgents.forEach((agentKey) => {
+  if (onlineAgents.length > 0) {
+    const classification = await classifyAgents(prompt, onlineAgents).catch((error) => {
+      addLog(`<strong>Orchestrator error:</strong> ${error.message}. Falling back to local routing.`);
+      return null;
+    });
+
+    if (Array.isArray(classification) && classification.length > 0) {
+      steps = classification
+        .map((item) => {
+          const key = getAgentKeyByName(item.agent);
+          return key ? { key, prompt: item.prompt?.trim() || prompt } : null;
+        })
+        .filter(Boolean);
+      const names = steps.map((step) => AGENTS[step.key].name).join(', ');
+      addLog(`<strong>Routing:</strong> orchestrator selected agents in order: ${names}.`);
+    }
+  }
+
+  if (steps.length === 0) {
+    const fallbackKeys = getRequestedAgents(prompt);
+    steps = fallbackKeys.map((key) => ({ key, prompt }));
+    const names = steps.map((step) => AGENTS[step.key].name).join(', ');
+    addLog(`<strong>Routing:</strong> falling back to local routing for: ${names}.`);
+  }
+
+  await executeAgentSequence(steps);
+}
+
+async function executeAgentSequence(agentSteps) {
+  let priorAnswer = '';
+
+  for (const step of agentSteps) {
+    const agentKey = step.key;
     const agent = AGENTS[agentKey];
 
     if (!agentState[agentKey]) {
-      addLog(`<strong>${agent.name}:</strong> is offline. Trying ${maxAttempts} connection attempts.`);
-      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-        addLog(`<strong>${agent.name} retry ${attempt}/${maxAttempts}:</strong> trying to connect...`);
-        if (attempt === maxAttempts) {
-          addLog(`<strong>${agent.name}:</strong> stayed offline after ${maxAttempts} attempts. Skipping this agent.`);
-          return;
-        }
-      }
+      addLog(`<strong>${agent.name}:</strong> is offline. Skipping this agent.`);
+      continue;
     }
 
-    const agentPrompt = extractAgentPrompt(prompt, agentKey);
+    let agentPrompt = step.prompt;
+    if (priorAnswer) {
+      agentPrompt += `\n\nUse the prior answer as context: ${priorAnswer}`;
+    }
+
     addLog(`<strong>Routed to:</strong> ${agent.name}. Sending the agent-specific prompt for a live answer.`);
-    callLiveLLM(agentPrompt, agent.name);
-  });
+    const answer = await callLiveLLM(agentPrompt, agent.name, priorAnswer);
+    priorAnswer = answer;
+  }
 }
 
-function callLiveLLM(prompt, agentName) {
+function callLiveLLM(prompt, agentName, priorAnswer = '') {
   // Build a system instruction to guide the assigned agent.
   const systemMessage = {
     role: 'system',
@@ -306,9 +400,14 @@ function callLiveLLM(prompt, agentName) {
 `,
   };
 
+  let userPrompt = prompt;
+  if (priorAnswer) {
+    userPrompt += `\n\nPrevious agent answer:\n${priorAnswer}`;
+  }
+
   const userMessage = {
     role: 'user',
-    content: prompt,
+    content: userPrompt,
   };
 
   const messages = [systemMessage, userMessage];
@@ -316,21 +415,23 @@ function callLiveLLM(prompt, agentName) {
   if (agentName === 'Cook') {
     systemMessage.content = `You are a helpful cook. Answer only cooking and food questions.
 If the user asks about boiling water, explain how to boil water clearly and directly.
-Do not provide medical advice. Do not tell jokes.`;
+Do not provide medical advice. Do not tell jokes unless the prompt explicitly asks for a joke from you.`;
   }
 
   if (agentName === 'Doctor') {
     systemMessage.content = `You are a caring doctor. Answer only medical and health questions.
-If the user asks about burns, give first-aid steps clearly and safely.
-Do not provide cooking instructions. Do not tell jokes.`;
+If the user asks about symptoms or a condition, explain them clearly and safely.
+Do not provide cooking instructions. Do not tell jokes unless the prompt explicitly asks for a joke from you.`;
   }
 
   if (agentName === 'Comedian') {
-    systemMessage.content = `You are a playful comedian. Tell only a short, relevant joke.
-Do not explain how boiling water works. Do not provide cooking instructions or medical advice.`;
+    systemMessage.content = `You are a playful comedian. If the user asks for riddles, create the exact number of riddles requested and keep them kid-friendly when asked.
+If the user asks for a joke, provide a short relevant joke.
+If prior medical or cooking context is provided, make the humor based on that context.
+Do not provide explanations or medical advice unless the prompt explicitly asks for it from you.`;
   }
 
-  fetch(endpoint, {
+  return fetch(endpoint, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -348,14 +449,14 @@ Do not explain how boiling water works. Do not provide cooking instructions or m
       return response.json();
     })
     .then((data) => {
-      // The model response lives in the OpenAI-like response shape.
-      // We read the first assistant message content from data.choices[0].message.content.
       const answer = data?.choices?.[0]?.message?.content || 'No answer returned.';
       addLog(`<strong>Story:</strong> routed to ${agentName}, asked the live model, and got the answer.`);
       addChatBubble(answer, 'answer', agentName);
+      return answer;
     })
     .catch((error) => {
       addLog(`<strong>Proxy error:</strong> the request did not return a successful answer. ${error.message}`);
+      return `Error: ${error.message}`;
     });
 }
 
